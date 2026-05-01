@@ -14,8 +14,8 @@ pip install -r requirements.txt
 
 2. Create a `.env` file:
 
-token=your_telegram_bot_token
-apikey=your_api_key
+BOT_TOKEN=your_new_token  
+OMDB_API_KEY=your_api_key  
 
 3. Start the bot:
 
