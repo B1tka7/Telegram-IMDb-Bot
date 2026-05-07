@@ -1,114 +1,142 @@
-from config import bot, OMDB_API_KEY
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-import requests
 import re
+import requests
+import sqlite3
+import telebot
+from telebot import types
+from config import OMDB_API_KEY
 
-non_inglish = re.compile("[^A-Za-z0-9 .,?!'\"-]")
+# DB
+db = sqlite3.connect('example.db', check_same_thread=False)
+c = db.cursor()
 
+c.execute("""
+CREATE TABLE IF NOT EXISTS movie_list (
+    title text,
+    year text,
+    status boolean,
+    imdb_id text,
+    user_id integer
+)
+""")
+db.commit()
 
-def search_movie(title):
-    url = f'https://www.omdbapi.com/?apikey={OMDB_API_KEY}&s={title}'
-    response = requests.get(url)
-    data = response.json()
-    if "Search" not in data:
-        return None
-    list_movies = data["Search"]
+non_english = re.compile("[^A-Za-z0-9 .,?!'\"-]")
 
-    kb = InlineKeyboardMarkup()
+# SEARCH
+def search_movies(title):
+    url = f"https://www.omdbapi.com/?apikey={OMDB_API_KEY}&s={title}"
+    return requests.get(url).json()
 
-    for chapter in list_movies:
-        Title = chapter["Title"]
-        Year = chapter["Year"]
-        imdbID = chapter["imdbID"]
+def get_movie(imdb_id):
+    url = f"https://www.omdbapi.com/?apikey={OMDB_API_KEY}&i={imdb_id}"
+    return requests.get(url).json()
 
-        kb.add(InlineKeyboardButton(
-            text=f"{Title} ({Year})",
-            callback_data=f"film_{imdbID}"
-        ))
+def register_handlers(bot):
 
-    return kb
+    @bot.message_handler(commands=['start'])
+    def start(message):
+        bot.send_message(
+            message.chat.id,
+            "Movie bot ready.\n/search or type a title\n/wishlist"
+        )
 
+    @bot.message_handler(commands=['search'])
+    def search_cmd(message):
+        bot.send_message(message.chat.id, "Enter movie title:")
 
-@bot.message_handler(commands=['start'])
-def main(message):
-    bot.send_message(
-        message.chat.id,
-        "I can help you find information about a movie.\n\nJust enter the movie title or use /search"
-    )
+    @bot.message_handler(func=lambda m: m.text and not m.text.startswith('/'))
+    def handle_text(message):
 
+        if len(message.text) > 100:
+            bot.reply_to(message, "Too long")
+            return
 
-@bot.message_handler(content_types=['voice', 'photo', 'video', 'audio', 'document', 'video_note', 'sticker', 'location', 'contact', 'animation', 'poll', 'dice'])
-def block_non_text(msg):
-    bot.reply_to(msg, "Please send text only.")
+        if non_english.search(message.text):
+            bot.reply_to(message, "English only")
+            return
 
+        data = search_movies(message.text)
 
-@bot.message_handler(commands=['search'])
-def search_command(message):
-    bot.send_message(message.chat.id, "Enter the movie title to search:")
+        if "Search" not in data:
+            bot.send_message(message.chat.id, "No results")
+            return
 
+        kb = types.InlineKeyboardMarkup()
 
-@bot.message_handler(content_types=['text'])
-def handle_text(message):
-    if message.text.startswith('/'):
-        return
-    if len(message.text) > 100:
-        bot.reply_to(message, "Title too long")
-        return
-    if non_inglish.search(message.text):
-        bot.reply_to(message, "Please enter the movie title in English.")
-    else:
-        keyboard = search_movie(title=message.text)
-        if keyboard is None:
-            bot.send_message(message.chat.id, "No movies found with that title. Please try again.")
+        for m in data["Search"]:
+            kb.add(types.InlineKeyboardButton(
+                text=f"{m['Title']} ({m['Year']})",
+                callback_data=f"film_{m['imdbID']}"
+            ))
+
+        bot.send_message(message.chat.id, "Results:", reply_markup=kb)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("film_"))
+    def film(call):
+        imdb_id = call.data.replace("film_", "")
+        data = get_movie(imdb_id)
+
+        text = (
+            f"<b>{data['Title']}</b> ({data['Year']})\n\n"
+            f"Genre: {data.get('Genre')}\n"
+            f"Actors: {data.get('Actors')}\n\n"
+            f"Plot:\n{data.get('Plot')}"
+        )
+
+        kb = types.InlineKeyboardMarkup()
+        kb.add(types.InlineKeyboardButton("Add to wishlist", callback_data=f"add|{imdb_id}"))
+
+        if data.get("Poster") and data["Poster"] != "N/A":
+            bot.send_photo(call.message.chat.id, data["Poster"], caption=text, parse_mode="HTML", reply_markup=kb)
         else:
-            bot.send_message(
-                message.chat.id,
-                "The following films have been found based on your search.",
-                reply_markup=keyboard
-            )
+            bot.send_message(call.message.chat.id, text, parse_mode="HTML", reply_markup=kb)
 
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("add|"))
+    def add(call):
+        user_id = call.from_user.id
+        imdb_id = call.data.split("|")[1]
 
-@bot.callback_query_handler(func=lambda call: True)
-def callback_worker(call):
-    imdb_id = call.data.replace("film_", "")
-    url_finish = f'https://www.omdbapi.com/?apikey={OMDB_API_KEY}&i={imdb_id}'
-    r = requests.get(url_finish, timeout=5)
-    d = r.json()
+        c.execute("SELECT * FROM movie_list WHERE imdb_id=? AND user_id=?", (imdb_id, user_id))
+        if c.fetchone():
+            bot.answer_callback_query(call.id, "Already added")
+            return
 
-    poster = d.get("Poster", "N/A")
-    title = d.get("Title", "Not Found")
-    year = d.get("Year", "Not Found")
+        movie = get_movie(imdb_id)
 
-    imdb_rating = (
-        d.get("Ratings", [{}])[0].get("Value", "Not Found")
-        if d.get("Ratings")
-        else "Not Found"
-    )
+        c.execute(
+            "INSERT INTO movie_list VALUES (?, ?, ?, ?, ?)",
+            (movie["Title"], movie["Year"], False, imdb_id, user_id)
+        )
+        db.commit()
 
-    rotten_tomatoes = "Not Found"
-    if len(d.get("Ratings", [{}])) > 1:
-        rotten_tomatoes = d.get("Ratings", [{}])[1].get("Value", "Not Found")
+        bot.answer_callback_query(call.id, "Added")
 
-    length = d.get("Runtime", "Not Found")
-    genre = d.get("Genre", "Not Found")
-    actors = d.get("Actors", "Not Found")
-    director = d.get("Director", "Not Found")
-    plot = d.get("Plot", "Not Found")
+    @bot.message_handler(commands=['wishlist'])
+    def wishlist(message):
+        user_id = message.from_user.id
 
-    caption = (
-        f"🎬 <b>{title} ({year})</b>\n\n"
-        f"⭐ IMDb: <b>{imdb_rating}</b>\n"
-        f"🍅 Rotten Tomatoes: <b>{rotten_tomatoes}</b>\n"
-        f"⏱ Length: {length}\n"
-        f"🎭 Genre: {genre}\n\n"
-        f"👥 Cast: {actors}\n"
-        f"🎬 Director: {director}\n\n"
-        f"📖 <b>Plot:</b>\n{plot}"
-    )
+        c.execute("SELECT title, year, status, imdb_id FROM movie_list WHERE user_id=?", (user_id,))
+        rows = c.fetchall()
 
-    if poster == "N/A":
-        bot.send_message(call.message.chat.id, caption, parse_mode="HTML")
-    else:
-        bot.send_photo(call.message.chat.id, photo=poster, caption=caption, parse_mode="HTML")
+        if not rows:
+            bot.send_message(message.chat.id, "Empty wishlist")
+            return
 
-    bot.answer_callback_query(call.id)
+        for title, year, status, imdb_id in rows:
+
+            text = f"<b>{title}</b> ({year})\n" + ("Watched" if status else "Not watched")
+
+            kb = types.InlineKeyboardMarkup()
+            kb.add(types.InlineKeyboardButton("Delete", callback_data=f"delete|{imdb_id}"))
+
+            bot.send_message(message.chat.id, text, parse_mode="HTML", reply_markup=kb)
+
+    @bot.callback_query_handler(func=lambda call: call.data.startswith("delete|"))
+    def delete(call):
+        imdb_id = call.data.split("|")[1]
+        user_id = call.from_user.id
+
+        c.execute("DELETE FROM movie_list WHERE imdb_id=? AND user_id=?", (imdb_id, user_id))
+        db.commit()
+
+        bot.answer_callback_query(call.id, "Deleted")
