@@ -13,18 +13,18 @@ v1.1
 
 ## How to run
 
-    Install dependencies:
+Install dependencies:
 
-pip install -r requirements.txt
+    pip install -r requirements.txt
 
-    Create a .env file:
+Create a .env file:
 
-BOT_TOKEN=your_new_token
-OMDB_API_KEY=your_api_key
+    BOT_TOKEN=your_new_token
+    OMDB_API_KEY=your_api_key
 
-    Start the bot:
+Start the bot:
 
-python main.py
+    python main.py
 
 ## Updates (v1.1)
 - Added personal wishlist system
